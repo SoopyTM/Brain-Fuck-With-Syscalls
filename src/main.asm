@@ -6,11 +6,7 @@ section .data
     file_desc    dd 0              ; File descriptor returned by the system
     file_size    dd 0              ; Total bytes read from the file
     cellPointer  dd 0              ; Index (0-1023) pointing to the current active cell
-    
-    ; Variables for display_cells
-    space        db ' '            ; Space character for formatting
-    newline      db 10             ; Newline character for formatting
-    temp_buf     times 4 db 0      ; Temporary buffer for number-to-string conversion
+    pointer_storage dd 0           ; Stores 32-bit address for ECX syscalls
 
 section .text
     global _start
@@ -67,15 +63,14 @@ count_done:
     int 0x80
 
     ; --- Process fileContents ---
-    mov esi, 0          ; Instruction pointer
+    mov esi, 0          ; Instruction pointer (ESI is our program counter)
 
 process_loop:
     cmp esi, [file_size]
-    je finish_processing
+    je exit_program
 
     mov al, [fileContents + esi]
     
-    ; Logic for instruction parsing
     cmp al, '+'
     je increment_cell
     cmp al, '-'
@@ -84,6 +79,10 @@ process_loop:
     je increment_pointer
     cmp al, '<'
     je decrement_pointer
+    cmp al, '&'
+    je set_ecx_pointer
+    cmp al, '.'
+    je trigger_syscall
     jmp next_char
 
 increment_cell:
@@ -99,9 +98,9 @@ decrement_cell:
 increment_pointer:
     mov eax, [cellPointer]
     inc eax
-    cmp eax, 1024       ; Check if we went past the last index (1023)
-    jne .save           ; If not 1024, it's fine
-    xor eax, eax        ; If 1024, wrap back to 0
+    cmp eax, 1024
+    jne .save
+    xor eax, eax
 .save:
     mov [cellPointer], eax
     jmp next_char
@@ -109,19 +108,46 @@ increment_pointer:
 decrement_pointer:
     mov eax, [cellPointer]
     dec eax
-    cmp eax, -1         ; Check if we went below the first index (0)
-    jne .save           ; If not -1, it's fine
-    mov eax, 1023       ; If -1, wrap to 1023
+    cmp eax, -1
+    jne .save
+    mov eax, 1023
 .save:
     mov [cellPointer], eax
+    jmp next_char
+
+set_ecx_pointer:
+    ; Calculate actual memory address of the current cell
+    mov ebx, cells
+    add ebx, [cellPointer]
+    mov [pointer_storage], ebx
+    jmp next_char
+
+trigger_syscall:
+    ; We MUST save all registers that the interpreter uses
+    ; ESI is our program counter. EBX is often used for indexing.
+    push esi
+    push ebx
+
+    ; Map cells 0, 1, 3, 4, 5, 6 to registers
+    ; We SKIP cell 2 because ECX is handled by the '&' pointer_storage
+    movzx eax, byte [cells + 0]    ; syscall number (e.g., 4 for write)
+    movzx ebx, byte [cells + 1]    ; arg 1 (e.g., 1 for stdout)
+    movzx ecx, byte [cells + 2]     ; arg 2 (The pointer we saved with '&')
+    movzx edx, byte [cells + 3]    ; arg 3 (e.g., length)
+    movzx esi, byte [cells + 4]    ; arg 4
+    movzx edi, byte [cells + 5]    ; arg 5
+    movzx ebp, byte [cells + 6]    ; arg 6
+
+    int 0x80                       ; Execute Syscall
+
+    ; Restore our interpreter state
+    pop ebx
+    pop esi
     jmp next_char
 
 next_char:
     inc esi
     jmp process_loop
-
-finish_processing:
-    call display_cells  ; Display the state of the first 10 cells
 
 exit_program:
     mov eax, 1          
@@ -132,43 +158,3 @@ error_exit:
     mov eax, 1
     mov ebx, 1
     int 0x80
-
-; --- Function: display_cells ---
-; Iterates through the first 10 entries of 'cells' and prints them to stdout
-display_cells:
-    mov ecx, 0          ; Loop counter (0 to 9)
-display_loop:
-    push ecx            
-    movzx eax, byte [cells + ecx]
-    mov edi, temp_buf + 3 
-    mov byte [edi], 0     
-    mov ebx, 10           
-.convert:
-    dec edi
-    xor edx, edx
-    div ebx               
-    add dl, '0'           
-    mov [edi], dl
-    test eax, eax
-    jnz .convert
-    mov edx, temp_buf + 3
-    sub edx, edi          
-    mov eax, 4            
-    mov ebx, 1            
-    mov ecx, edi          
-    int 0x80
-    mov eax, 4
-    mov ebx, 1
-    mov ecx, space
-    mov edx, 1
-    int 0x80
-    pop ecx               
-    inc ecx
-    cmp ecx, 10
-    jl display_loop
-    mov eax, 4
-    mov ebx, 1
-    mov ecx, newline
-    mov edx, 1
-    int 0x80
-    ret
