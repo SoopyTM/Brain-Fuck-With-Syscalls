@@ -6,7 +6,6 @@ section .data
     file_desc    dd 0              ; File descriptor returned by the system
     file_size    dd 0              ; Total bytes read from the file
     cellPointer  dd 0              ; Index (0-1023) pointing to the current active cell
-    pointer_storage dd 0           ; Stores 32-bit address for ECX syscalls
 
 section .text
     global _start
@@ -79,8 +78,10 @@ process_loop:
     je increment_pointer
     cmp al, '<'
     je decrement_pointer
-    cmp al, '&'
-    je set_ecx_pointer
+    cmp al, '['
+    je loop_start
+    cmp al, ']'
+    je loop_end
     cmp al, '.'
     je trigger_syscall
     jmp next_char
@@ -115,11 +116,62 @@ decrement_pointer:
     mov [cellPointer], eax
     jmp next_char
 
-set_ecx_pointer:
-    ; Calculate actual memory address of the current cell
-    mov ebx, cells
-    add ebx, [cellPointer]
-    mov [pointer_storage], ebx
+loop_start:
+    ; If current cell is zero, skip forward to matching ']'
+    mov ebx, [cellPointer]
+    cmp byte [cells + ebx], 0
+    jne next_char
+
+    mov edx, 1
+.find_match_forward:
+    inc esi
+    cmp esi, [file_size]
+    je error_exit
+
+    mov al, [fileContents + esi]
+    cmp al, '['
+    je .inc_depth
+    cmp al, ']'
+    je .dec_depth
+    jmp .find_match_forward
+
+.inc_depth:
+    inc edx
+    jmp .find_match_forward
+
+.dec_depth:
+    dec edx
+    cmp edx, 0
+    jne .find_match_forward
+    jmp next_char
+
+loop_end:
+    ; If current cell is non-zero, jump back to matching '['
+    mov ebx, [cellPointer]
+    cmp byte [cells + ebx], 0
+    je next_char
+
+    mov edx, 1
+.find_match_backward:
+    dec esi
+    cmp esi, -1
+    je error_exit
+
+    mov al, [fileContents + esi]
+    cmp al, ']'
+    je .inc_depth
+    cmp al, '['
+    je .dec_depth
+    jmp .find_match_backward
+
+.inc_depth:
+    inc edx
+    jmp .find_match_backward
+
+.dec_depth:
+    dec edx
+    cmp edx, 0
+    jne .find_match_backward
     jmp next_char
 
 trigger_syscall:
@@ -128,15 +180,49 @@ trigger_syscall:
     push esi
     push ebx
 
-    ; Map cells 0, 1, 3, 4, 5, 6 to registers
-    ; We SKIP cell 2 because ECX is handled by the '&' pointer_storage
-    movzx eax, byte [cells + 0]    ; syscall number (e.g., 4 for write)
-    movzx ebx, byte [cells + 1]    ; arg 1 (e.g., 1 for stdout)
-    movzx ecx, byte [cells + 2]     ; arg 2 (The pointer we saved with '&')
-    movzx edx, byte [cells + 3]    ; arg 3 (e.g., length)
-    movzx esi, byte [cells + 4]    ; arg 4
-    movzx edi, byte [cells + 5]    ; arg 5
-    movzx ebp, byte [cells + 6]    ; arg 6
+    ; First 28 bytes are 7 little-endian 32-bit registers:
+    ; EAX cells[0..3], EBX cells[4..7], ECX cells[8..11], EDX cells[12..15],
+    ; ESI cells[16..19], EDI cells[20..23], EBP cells[24..27].
+    ; Pointer convention (for args only): if bit 31 is set, treat the value
+    ; as a tape index and convert it to an address: cells + (value & 1023).
+    mov eax, [cells + 0]
+    mov ebx, [cells + 4]
+    mov ecx, [cells + 8]
+    mov edx, [cells + 12]
+    mov esi, [cells + 16]
+    mov edi, [cells + 20]
+    mov ebp, [cells + 24]
+
+    test ebx, 0x80000000
+    jz .ebx_ready
+    and ebx, 1023
+    add ebx, cells
+.ebx_ready:
+    test ecx, 0x80000000
+    jz .ecx_ready
+    and ecx, 1023
+    add ecx, cells
+.ecx_ready:
+    test edx, 0x80000000
+    jz .edx_ready
+    and edx, 1023
+    add edx, cells
+.edx_ready:
+    test esi, 0x80000000
+    jz .esi_ready
+    and esi, 1023
+    add esi, cells
+.esi_ready:
+    test edi, 0x80000000
+    jz .edi_ready
+    and edi, 1023
+    add edi, cells
+.edi_ready:
+    test ebp, 0x80000000
+    jz .ebp_ready
+    and ebp, 1023
+    add ebp, cells
+.ebp_ready:
 
     int 0x80                       ; Execute Syscall
 
